@@ -28,8 +28,9 @@ class TimesheetParseError(Exception):
 # Matching is done on a normalized form (lowercased, punctuation stripped).
 STANDARD_FIELDS: dict[str, list[str]] = {
     "employee_name": [
-        "employee name", "employee", "name", "emp name", "staff name",
-        "worker", "full name", "team member", "resource", "resource name",
+        "employee name", "employee full name", "name", "emp name",
+        "staff name", "worker", "full name", "team member", "resource",
+        "resource name",
     ],
     "employee_id": [
         "employee id", "emp id", "employee number", "staff id", "id",
@@ -63,7 +64,14 @@ REQUIRED_FIELDS = ["employee_name", "hours_worked"]
 
 def _normalize(text: str) -> str:
     """Lowercase, strip, and remove non-alphanumeric characters for comparison."""
-    return re.sub(r"[^a-z0-9]", "", str(text).lower().strip())
+    text = str(text).lower().strip()
+    # Spell out "#" as "number" *before* stripping punctuation, so a header
+    # like "Employee #" normalizes to "employee number" (matching the
+    # employee_id alias) instead of collapsing to just "employee" (which
+    # would collide with the employee_name alias and overwrite the real
+    # name with the employee number — see STANDARD_FIELDS below).
+    text = text.replace("#", " number ")
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
 @dataclass
@@ -93,17 +101,23 @@ def detect_column_mapping(columns: list[str]) -> ColumnMapping:
                 match = normalized_lookup[norm_alias]
                 break
 
-        # 2. Fallback: substring match (e.g. "Employee Full Name" contains "name")
+        # 2. Fallback: substring match (e.g. "Employee Full Name" contains "name").
+        # Score every candidate column and keep the LONGEST alias match, not
+        # just the first column encountered in file order. Short generic
+        # aliases like "name" can appear inside unrelated headers (e.g. a
+        # "Job site Name" column) — without this, a real-world file could
+        # have that unrelated column stolen ahead of the actual
+        # "Employee Full Name" column simply because it came first.
         if not match:
+            best_len = 0
             for norm_col, original_col in normalized_lookup.items():
                 if original_col in used_source_cols:
                     continue
                 for norm_alias in normalized_aliases:
                     if len(norm_alias) >= 3 and (norm_alias in norm_col or norm_col in norm_alias):
-                        match = original_col
-                        break
-                if match:
-                    break
+                        if len(norm_alias) > best_len:
+                            best_len = len(norm_alias)
+                            match = original_col
 
         if match:
             result.mapping[std_field] = match
