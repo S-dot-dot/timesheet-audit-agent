@@ -202,4 +202,71 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
 def load_and_standardize(file_bytes: bytes, filename: str, source_label: str) -> tuple[pd.DataFrame, ColumnMapping]:
     """Convenience wrapper: load raw bytes straight to a standardized DataFrame."""
     raw_df = load_raw_dataframe(file_bytes, filename)
-    return standardize_dataframe(raw_df, source_label)
+    std_df, mapping = standardize_dataframe(raw_df, source_label)
+
+    # Some timesheet exports report one row per (employee, project, week)
+    # with a separate column per weekday ("Monday", "Tuesday", ...) holding
+    # that day's hours, alongside a week-ending date and a weekly total.
+    # Everything above treats each row as a single day worked — which is
+    # wrong for this layout, and badly confuses any per-day check (a
+    # 56-hour week gets read as a 56-hour DAY). When we spot that shape,
+    # explode each row into one row per real day actually worked instead.
+    weekday_cols = _find_weekday_columns(raw_df.columns)
+    if len(weekday_cols) >= 3:
+        std_df = _expand_weekly_rollup_to_daily(std_df, weekday_cols)
+
+    return std_df, mapping
+
+
+WEEKDAY_COLUMN_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _find_weekday_columns(columns) -> dict[int, str]:
+    """Map weekday index (Monday=0 ... Sunday=6) to the actual source column
+    name, for files that lay a week out as one column per day."""
+    targets = {_normalize(name): i for i, name in enumerate(WEEKDAY_COLUMN_NAMES)}
+    found: dict[int, str] = {}
+    for col in columns:
+        idx = targets.get(_normalize(col))
+        if idx is not None:
+            found[idx] = col
+    return found
+
+
+def _expand_weekly_rollup_to_daily(std_df: pd.DataFrame, weekday_cols: dict[int, str]) -> pd.DataFrame:
+    """
+    Turn one row per (employee, project, week-ending date) with day-of-week
+    columns into one row per real day worked, with that day's actual hours
+    and actual calendar date. This lets day-level checks (single-day
+    overload, duplicate entries, missing project codes) work correctly
+    instead of comparing a whole week's hours against a one-day threshold.
+    """
+    if std_df.empty or "date" not in std_df.columns or std_df["date"].isna().all():
+        return std_df  # no reliable week-ending date to anchor real days to
+
+    day_col_names = set(weekday_cols.values())
+    carry_cols = [c for c in std_df.columns if c not in day_col_names]
+    expanded_rows: list[dict] = []
+
+    for _, row in std_df.iterrows():
+        week_end = row["date"]
+        if pd.isna(week_end):
+            continue
+        # Anchor each weekday column to a real date relative to this row's
+        # own week-ending date — don't assume "weekending" always lands on
+        # a particular weekday, just use whichever day it actually is.
+        week_end_dow = week_end.weekday()  # Monday=0 ... Sunday=6
+        base = {c: row[c] for c in carry_cols}
+        for weekday_idx, col_name in weekday_cols.items():
+            hours = row.get(col_name)
+            if pd.isna(hours):
+                continue
+            new_row = dict(base)
+            new_row["date"] = week_end - pd.Timedelta(days=(week_end_dow - weekday_idx))
+            new_row["hours_worked"] = float(hours)
+            expanded_rows.append(new_row)
+
+    if not expanded_rows:
+        return std_df
+
+    return pd.DataFrame(expanded_rows).reset_index(drop=True)
