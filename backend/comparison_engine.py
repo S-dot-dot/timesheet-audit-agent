@@ -352,12 +352,25 @@ class TimesheetAuditEngine:
     # ------------------------------------------------------------------
     def build_full_report(self) -> dict:
         headcount = self.compute_headcount_changes()
+
+        # Attach each employee's prior-period hours alongside their current
+        # total so the dashboard can show "this week" vs. "last week"
+        # side-by-side, instead of requiring a trip to a different tab.
+        prev_hours_by_name = (
+            self.agg_prev.set_index("employee_name")["total_hours"]
+            if not self.agg_prev.empty else pd.Series(dtype=float)
+        )
+        employees_curr = self.agg_curr.to_dict(orient="records")
+        for emp in employees_curr:
+            prev_hours = prev_hours_by_name.get(emp["employee_name"])
+            emp["hours_prev"] = None if prev_hours is None or pd.isna(prev_hours) else float(prev_hours)
+
         return {
             "summary": self.build_summary(),
             "new_hires": headcount["new_hires"],
             "departures": headcount["departures"],
             "reassignments": self.compute_reassignments(),
             "anomalies": self.detect_anomalies(),
-            "employees_curr": self.agg_curr.to_dict(orient="records"),
+            "employees_curr": employees_curr,
             "employees_prev": self.agg_prev.to_dict(orient="records"),
         }
