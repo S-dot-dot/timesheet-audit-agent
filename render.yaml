@@ -13,8 +13,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.13.0
+           - key: PYTHON_VERSION
+        value: 3.11.9
       # Optional: only needed if you want the LLM fallback in the query box.
       # Set the real value in the Render dashboard, not in this file.
       - key: ANTHROPIC_API_KEY
