@@ -315,13 +315,11 @@ const TABLE_COLUMNS = {
   new_hires: [
     { key: 'employee_name', label: 'Employee' },
     { key: 'hours_in_first_period', label: 'Hours (First Seen)' },
-    { key: 'primary_project', label: 'Project' },
     { key: 'primary_sales_rep', label: 'Sales Rep' },
   ],
   departures: [
     { key: 'employee_name', label: 'Employee' },
     { key: 'hours_in_final_period', label: 'Hours (Last Seen)' },
-    { key: 'primary_project', label: 'Project' },
     { key: 'primary_sales_rep', label: 'Sales Rep' },
   ],
   reassignments: [
@@ -340,9 +338,9 @@ const TABLE_COLUMNS = {
   ],
   employees_curr: [
     { key: 'employee_name', label: 'Employee' },
-    { key: 'total_hours', label: 'Total Hours' },
+    { key: 'total_hours', label: 'Hours (This Week)' },
+    { key: 'hours_prev', label: 'Hours (Last Week)' },
     { key: 'total_pto', label: 'PTO Hours' },
-    { key: 'projects', label: 'Project(s)' },
     { key: 'sales_reps', label: 'Sales Rep(s)' },
     { key: 'entry_count', label: 'Entries' },
   ],
