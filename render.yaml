@@ -1,0 +1,21 @@
+# Render Blueprint — deploys the FastAPI backend (which also serves the
+# frontend/ folder) as a single web service.
+#
+# To use: push this file to the root of your GitHub repo, then in Render
+# choose "New +" -> "Blueprint" and point it at the repo. Render will read
+# this file and set everything up automatically.
+services:
+  - type: web
+    name: timesheet-audit-agent
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
+      # Optional: only needed if you want the LLM fallback in the query box.
+      # Set the real value in the Render dashboard, not in this file.
+      - key: ANTHROPIC_API_KEY
+        sync: false

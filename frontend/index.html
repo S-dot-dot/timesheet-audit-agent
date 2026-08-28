@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Timesheet Audit &amp; Comparison — Control Deck</title>
+<link rel="stylesheet" href="tailwind.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* Defensive fallback: guarantees show/hide logic works even if the
+     compiled stylesheet somehow fails to load in a given environment. */
+  .hidden{ display:none !important; }
+
+  :root{
+    --ink:#0B1220;
+    --panel:#121B2E;
+    --panel-alt:#17233B;
+    --hairline:#28324A;
+    --text:#E8ECF4;
+    --muted:#8B96AE;
+    --amber:#F5A623;
+    --danger:#EF5350;
+    --success:#34D399;
+    --info:#5B8DEF;
+  }
+  html,body{background:var(--ink); color:var(--text); font-family:'Inter',sans-serif;}
+  .font-display{font-family:'IBM Plex Sans Condensed',sans-serif; letter-spacing:0.01em;}
+  .font-mono{font-family:'IBM Plex Mono',monospace;}
+  ::-webkit-scrollbar{width:10px; height:10px;}
+  ::-webkit-scrollbar-track{background:var(--ink);}
+  ::-webkit-scrollbar-thumb{background:var(--hairline); border-radius:6px;}
+
+  .panel{background:var(--panel); border:1px solid var(--hairline);}
+  .panel-alt{background:var(--panel-alt);}
+
+  /* Signature element: audit "stamp" badges for severity / status,
+     rendered like an ink-stamped ledger mark. */
+  .stamp{
+    display:inline-flex; align-items:center; gap:.35rem;
+    font-family:'IBM Plex Mono',monospace; font-size:0.68rem; font-weight:600;
+    letter-spacing:0.08em; text-transform:uppercase;
+    padding:.18rem .55rem; border-radius:3px; border:1.5px solid currentColor;
+    transform:rotate(-2deg);
+    background:color-mix(in srgb, currentColor 10%, transparent);
+    white-space:nowrap;
+  }
+  .stamp.stamp-flat{ transform:none; }
+  .stamp-high{ color:var(--danger); }
+  .stamp-medium{ color:var(--amber); }
+  .stamp-low{ color:var(--info); }
+  .stamp-new{ color:var(--success); }
+  .stamp-out{ color:var(--danger); }
+  .stamp-neutral{ color:var(--info); }
+
+  .tab-btn{
+    font-family:'IBM Plex Sans Condensed',sans-serif; font-weight:600; font-size:0.85rem;
+    letter-spacing:0.03em; text-transform:uppercase;
+    padding:.6rem 1.1rem; color:var(--muted); border-bottom:2px solid transparent;
+    transition:all .15s ease; white-space:nowrap;
+  }
+  .tab-btn:hover{ color:var(--text); }
+  .tab-btn.active{ color:var(--amber); border-bottom-color:var(--amber); }
+
+  .ledger-row:hover{ background:rgba(255,255,255,0.02); }
+  .ledger-th{
+    font-family:'IBM Plex Mono',monospace; font-size:0.68rem; letter-spacing:0.08em;
+    text-transform:uppercase; color:var(--muted); cursor:pointer; user-select:none;
+    white-space:nowrap;
+  }
+  .ledger-th:hover{ color:var(--text); }
+
+  .drop-slot{
+    border:1.5px dashed var(--hairline); transition:all .15s ease; cursor:pointer;
+  }
+  .drop-slot:hover, .drop-slot.drag-over{ border-color:var(--amber); background:rgba(245,166,35,0.04); }
+  .drop-slot.filled{ border-style:solid; border-color:var(--success); }
+
+  .metric-card{ background:var(--panel); border:1px solid var(--hairline); }
+  .metric-value{ font-family:'IBM Plex Mono',monospace; font-weight:600; }
+
+  .glow-dot{
+    width:7px; height:7px; border-radius:50%; background:var(--success);
+    box-shadow:0 0 8px var(--success); animation:pulse 2s infinite;
+  }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.4;} }
+
+  .fade-in{ animation:fadeIn .25s ease; }
+  @keyframes fadeIn{ from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:translateY(0);} }
+
+  .btn-primary{
+    background:var(--amber); color:#1a1206; font-weight:600; font-family:'IBM Plex Sans Condensed',sans-serif;
+    letter-spacing:0.02em; transition:all .15s ease;
+  }
+  .btn-primary:hover{ filter:brightness(1.08); transform:translateY(-1px); }
+  .btn-primary:disabled{ opacity:.4; cursor:not-allowed; transform:none; }
+
+  .btn-ghost{
+    border:1px solid var(--hairline); color:var(--text); transition:all .15s ease;
+    font-family:'IBM Plex Sans Condensed',sans-serif; font-weight:600; letter-spacing:0.02em;
+  }
+  .btn-ghost:hover{ border-color:var(--amber); color:var(--amber); }
+
+  .chat-bubble-q{ background:var(--panel-alt); border:1px solid var(--hairline); }
+  .chat-bubble-a{ background:rgba(245,166,35,0.06); border:1px solid rgba(245,166,35,0.25); }
+
+  input[type=text], input[type=number]{
+    background:var(--panel-alt); border:1px solid var(--hairline); color:var(--text);
+  }
+  input[type=text]:focus, input[type=number]:focus{ outline:none; border-color:var(--amber); }
+  input[type=text]::placeholder{ color:var(--muted); }
+
+  .skeleton{ background:linear-gradient(90deg, var(--panel-alt) 25%, var(--hairline) 50%, var(--panel-alt) 75%); background-size:200% 100%; animation:shimmer 1.4s infinite; }
+  @keyframes shimmer{ 0%{background-position:200% 0;} 100%{background-position:-200% 0;} }
+
+  a:focus-visible, button:focus-visible, input:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ============================== TOP BAR ============================== -->
+<header class="border-b sticky top-0 z-40" style="border-color:var(--hairline); background:rgba(11,18,32,0.92); backdrop-filter:blur(8px);">
+  <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded flex items-center justify-center font-mono text-sm font-bold" style="background:var(--amber); color:#1a1206;">TA</div>
+      <div>
+        <h1 class="font-display text-lg font-bold leading-none tracking-wide">TIMESHEET AUDIT <span style="color:var(--amber)">/</span> CONTROL DECK</h1>
+        <p class="text-xs font-mono mt-1" style="color:var(--muted)">Comparative payroll &amp; allocation audit engine</p>
+      </div>
+    </div>
+    <div id="sessionIndicator" class="hidden items-center gap-2 text-xs font-mono" style="color:var(--muted)">
+      <span class="glow-dot"></span>
+      <span id="sessionLabel">No audit loaded</span>
+      <button id="newAuditBtn" class="btn-ghost px-3 py-1.5 rounded ml-3 text-xs">New Audit</button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-6 py-8">
+
+  <!-- ============================== INTAKE STATION ============================== -->
+  <section id="intakeSection">
+    <div class="mb-6">
+      <h2 class="font-display text-2xl font-bold">Intake Station</h2>
+      <p class="text-sm mt-1" style="color:var(--muted)">Load a baseline period and a current period. Column headers don't need to match — the engine maps them automatically.</p>
+    </div>
+
+    <form id="uploadForm">
+      <div class="grid md:grid-cols-2 gap-5">
+        <!-- Period A slot -->
+        <div>
+          <label class="font-mono text-xs uppercase tracking-widest" style="color:var(--muted)">Period A · Baseline</label>
+          <input type="text" id="period1_label" value="Period 1" class="w-full mt-2 mb-3 px-3 py-2 rounded text-sm" />
+          <div id="slot1" class="drop-slot rounded-lg p-8 text-center">
+            <input type="file" id="period1_file" accept=".csv,.xlsx,.xls" class="hidden" />
+            <div class="pointer-events-none">
+              <p class="font-mono text-sm" id="slot1Text" style="color:var(--muted)">Drop .csv / .xlsx here, or click to browse</p>
+            </div>
+          </div>
+        </div>
+        <!-- Period B slot -->
+        <div>
+          <label class="font-mono text-xs uppercase tracking-widest" style="color:var(--muted)">Period B · Current</label>
+          <input type="text" id="period2_label" value="Period 2" class="w-full mt-2 mb-3 px-3 py-2 rounded text-sm" />
+          <div id="slot2" class="drop-slot rounded-lg p-8 text-center">
+            <input type="file" id="period2_file" accept=".csv,.xlsx,.xls" class="hidden" />
+            <div class="pointer-events-none">
+              <p class="font-mono text-sm" id="slot2Text" style="color:var(--muted)">Drop .csv / .xlsx here, or click to browse</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Advanced threshold config -->
+      <details class="mt-5 panel rounded-lg p-4">
+        <summary class="font-mono text-xs uppercase tracking-widest cursor-pointer" style="color:var(--muted)">Audit thresholds (advanced)</summary>
+        <div class="grid sm:grid-cols-4 gap-4 mt-4">
+          <div>
+            <label class="text-xs font-mono" style="color:var(--muted)">Max hours / period</label>
+            <input type="number" id="max_reasonable_hours" value="60" class="w-full mt-1 px-2 py-1.5 rounded text-sm" />
+          </div>
+          <div>
+            <label class="text-xs font-mono" style="color:var(--muted)">Min hours / period</label>
+            <input type="number" id="min_reasonable_hours" value="10" class="w-full mt-1 px-2 py-1.5 rounded text-sm" />
+          </div>
+          <div>
+            <label class="text-xs font-mono" style="color:var(--muted)">Max hours / day</label>
+            <input type="number" id="max_single_day_hours" value="16" class="w-full mt-1 px-2 py-1.5 rounded text-sm" />
+          </div>
+          <div>
+            <label class="text-xs font-mono" style="color:var(--muted)">Spike/drop threshold %</label>
+            <input type="number" id="spike_drop_pct_threshold" value="40" class="w-full mt-1 px-2 py-1.5 rounded text-sm" />
+          </div>
+        </div>
+      </details>
+
+      <div class="flex items-center gap-4 mt-6">
+        <button type="submit" id="runAuditBtn" disabled class="btn-primary px-6 py-3 rounded-lg text-sm">Run Audit →</button>
+        <button type="button" id="loadSampleBtn" class="btn-ghost px-5 py-3 rounded-lg text-sm">Try with sample data</button>
+        <span id="uploadError" class="text-sm hidden" style="color:var(--danger)"></span>
+      </div>
+    </form>
+  </section>
+
+  <!-- ============================== LOADING STATE ============================== -->
+  <section id="loadingSection" class="hidden mt-10">
+    <div class="space-y-3">
+      <div class="skeleton h-24 rounded-lg"></div>
+      <div class="skeleton h-64 rounded-lg"></div>
+    </div>
+    <p class="text-center font-mono text-sm mt-4" style="color:var(--muted)">Running comparison engine…</p>
+  </section>
+
+  <!-- ============================== DASHBOARD (post-upload) ============================== -->
+  <section id="dashboardSection" class="hidden mt-2 fade-in">
+
+    <!-- Column mapping transparency strip -->
+    <div id="mappingStrip" class="panel rounded-lg px-4 py-3 mb-6 text-xs font-mono flex flex-wrap gap-x-6 gap-y-1" style="color:var(--muted)"></div>
+
+    <!-- Metric strip -->
+    <div id="metricStrip" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8"></div>
+
+    <!-- Tabs -->
+    <div class="border-b flex gap-1 overflow-x-auto" style="border-color:var(--hairline)">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="new_hires">New Hires</button>
+      <button class="tab-btn" data-tab="departures">Departures</button>
+      <button class="tab-btn" data-tab="reassignments">Reassignments</button>
+      <button class="tab-btn" data-tab="anomalies">Anomalies</button>
+      <button class="tab-btn" data-tab="employees_curr">Employees (Current)</button>
+    </div>
+
+    <!-- Tab toolbar: search + export -->
+    <div class="flex flex-wrap items-center justify-between gap-3 mt-4 mb-3">
+      <input type="text" id="tableSearch" placeholder="Search this table…" class="px-3 py-2 rounded text-sm w-64 max-w-full" />
+      <div class="flex gap-2">
+        <button id="exportCsvBtn" class="btn-ghost px-4 py-2 rounded text-xs">Export CSV</button>
+        <button id="exportPdfBtn" class="btn-ghost px-4 py-2 rounded text-xs">Export Full PDF Report</button>
+      </div>
+    </div>
+
+    <!-- Table panel -->
+    <div class="panel rounded-lg overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr id="tableHead" class="border-b" style="border-color:var(--hairline)"></tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
+      <div id="tableEmpty" class="hidden text-center py-12 font-mono text-sm" style="color:var(--muted)"></div>
+    </div>
+
+    <!-- Pagination -->
+    <div class="flex items-center justify-between mt-4 text-xs font-mono" style="color:var(--muted)">
+      <span id="paginationInfo"></span>
+      <div class="flex gap-2">
+        <button id="prevPageBtn" class="btn-ghost px-3 py-1.5 rounded">← Prev</button>
+        <button id="nextPageBtn" class="btn-ghost px-3 py-1.5 rounded">Next →</button>
+      </div>
+    </div>
+
+    <!-- ============================== QUERY DECK ============================== -->
+    <div class="mt-12">
+      <h3 class="font-display text-xl font-bold mb-1">Ask the Ledger</h3>
+      <p class="text-sm mb-4" style="color:var(--muted)">Ask a question about the audit in plain English — e.g. "Why did Evelyn Brooks's hours drop?" or "Show employees on Project P-100".</p>
+
+      <div id="chatFeed" class="space-y-3 mb-4 max-h-96 overflow-y-auto pr-1"></div>
+
+      <form id="queryForm" class="flex gap-3">
+        <input type="text" id="queryInput" placeholder="Type your question…" class="flex-1 px-4 py-3 rounded-lg text-sm" />
+        <button type="submit" class="btn-primary px-6 py-3 rounded-lg text-sm">Ask</button>
+      </form>
+      <div class="flex flex-wrap gap-2 mt-3">
+        <button class="suggestion-chip btn-ghost px-3 py-1 rounded-full text-xs">Who are the new hires?</button>
+        <button class="suggestion-chip btn-ghost px-3 py-1 rounded-full text-xs">Give me a summary</button>
+        <button class="suggestion-chip btn-ghost px-3 py-1 rounded-full text-xs">What anomalies were found?</button>
+        <button class="suggestion-chip btn-ghost px-3 py-1 rounded-full text-xs">Which employees left?</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="max-w-7xl mx-auto px-6 py-10 text-xs font-mono" style="color:var(--muted)">
+  Timesheet Audit &amp; Comparison AI Agent — data is processed in-memory for this session only.
+</footer>
+
+<script>
+/* ==========================================================================
+   CONFIG
+   ========================================================================== */
+// Same-origin by default (works when FastAPI serves this file directly).
+// Override by setting window.API_BASE before this script runs if the
+// frontend is hosted separately from the backend.
+const API_BASE = window.API_BASE || '';
+
+/* ==========================================================================
+   STATE
+   ========================================================================== */
+const state = {
+  sessionId: null,
+  report: null,
+  columnMapping: null,
+  activeTab: 'overview',
+  search: '',
+  sortBy: '',
+  sortDir: 'asc',
+  page: 1,
+  pageSize: 10,
+  files: { period1: null, period2: null },
+};
+
+const TABLE_COLUMNS = {
+  new_hires: [
+    { key: 'employee_name', label: 'Employee' },
+    { key: 'hours_in_first_period', label: 'Hours (First Seen)' },
+    { key: 'primary_project', label: 'Project' },
+    { key: 'primary_sales_rep', label: 'Sales Rep' },
+  ],
+  departures: [
+    { key: 'employee_name', label: 'Employee' },
+    { key: 'hours_in_final_period', label: 'Hours (Last Seen)' },
+    { key: 'primary_project', label: 'Project' },
+    { key: 'primary_sales_rep', label: 'Sales Rep' },
+  ],
+  reassignments: [
+    { key: 'employee_name', label: 'Employee' },
+    { key: 'previous_projects', label: 'Previous Project(s)' },
+    { key: 'current_projects', label: 'Current Project(s)' },
+    { key: 'previous_sales_reps', label: 'Previous Rep(s)' },
+    { key: 'current_sales_reps', label: 'Current Rep(s)' },
+  ],
+  anomalies: [
+    { key: 'severity', label: 'Severity' },
+    { key: 'type', label: 'Type' },
+    { key: 'employee_name', label: 'Employee' },
+    { key: 'period', label: 'Period' },
+    { key: 'detail', label: 'Detail' },
+  ],
+  employees_curr: [
+    { key: 'employee_name', label: 'Employee' },
+    { key: 'total_hours', label: 'Total Hours' },
+    { key: 'total_pto', label: 'PTO Hours' },
+    { key: 'projects', label: 'Project(s)' },
+    { key: 'sales_reps', label: 'Sales Rep(s)' },
+    { key: 'entry_count', label: 'Entries' },
+  ],
+};
+
+/* ==========================================================================
+   FILE UPLOAD UI
+   ========================================================================== */
+function setupDropSlot(slotId, inputId, textId, fileKey) {
+  const slot = document.getElementById(slotId);
+  const input = document.getElementById(inputId);
+  const text = document.getElementById(textId);
+
+  slot.addEventListener('click', () => input.click());
+  slot.addEventListener('dragover', (e) => { e.preventDefault(); slot.classList.add('drag-over'); });
+  slot.addEventListener('dragleave', () => slot.classList.remove('drag-over'));
+  slot.addEventListener('drop', (e) => {
+    e.preventDefault();
+    slot.classList.remove('drag-over');
+    if (e.dataTransfer.files.length) {
+      input.files = e.dataTransfer.files;
+      handleFileChosen();
+    }
+  });
+  input.addEventListener('change', handleFileChosen);
+
+  function handleFileChosen() {
+    const file = input.files[0];
+    if (!file) return;
+    state.files[fileKey] = file;
+    text.textContent = `✓ ${file.name}`;
+    slot.classList.add('filled');
+    updateRunButtonState();
+  }
+}
+setupDropSlot('slot1', 'period1_file', 'slot1Text', 'period1');
+setupDropSlot('slot2', 'period2_file', 'slot2Text', 'period2');
+
+function updateRunButtonState() {
+  document.getElementById('runAuditBtn').disabled = !(state.files.period1 && state.files.period2);
+}
+
+/* ==========================================================================
+   SAMPLE DATA (lets a user try the tool instantly, no files needed)
+   ========================================================================== */
+function csvToFile(csvText, filename) {
+  return new File([csvText], filename, { type: 'text/csv' });
+}
+
+const SAMPLE_P1_CSV = `Employee Name,Work Date,Project,Sales Rep,Hours,PTO Hours
+Alice Johnson,2026-08-03,P-100,Mark Reyes,8,0
+Alice Johnson,2026-08-04,P-100,Mark Reyes,8,0
+Bob Smith,2026-08-03,P-100,Mark Reyes,7.8,0
+Bob Smith,2026-08-04,P-100,Mark Reyes,8,0
+Carla Diaz,2026-08-03,P-200,Nina Patel,8,0
+David Kim,2026-08-03,P-200,Nina Patel,8,0
+Evelyn Brooks,2026-08-03,P-300,Mark Reyes,8,0
+Evelyn Brooks,2026-08-04,P-300,Mark Reyes,7.9,0
+Frank Ortiz,2026-08-03,P-100,Nina Patel,8,0
+Grace Lin,2026-08-03,P-400,Sam Cole,8,0
+Henry Adams,2026-08-03,P-300,Sam Cole,8,0
+Isabel Cruz,2026-08-03,P-200,Nina Patel,8,0
+Jack Turner,2026-08-03,P-400,Sam Cole,8,0
+Jack Turner,2026-08-07,P-400,Sam Cole,20,0`;
+
+const SAMPLE_P2_CSV = `Emp Name,Entry Date,Proj Code,Account Rep,Hrs Worked,Leave Hours
+Alice Johnson,2026-08-10,P-100,Mark Reyes,8.2,0
+Alice Johnson,2026-08-10,P-100,Mark Reyes,8,0
+Alice Johnson,2026-08-10,P-100,Mark Reyes,8,0
+Bob Smith,2026-08-11,P-100,Mark Reyes,7.8,0
+Bob Smith,2026-08-11,P-100,Mark Reyes,9,0
+Bob Smith,2026-08-11,P-100,Mark Reyes,4,0
+Carla Diaz,2026-08-10,P-200,Nina Patel,8,0
+David Kim,2026-08-10,P-200,Nina Patel,8,0
+Evelyn Brooks,2026-08-10,P-300,Mark Reyes,2.4,0
+Evelyn Brooks,2026-08-11,P-300,Mark Reyes,2.1,0
+Frank Ortiz,2026-08-10,P-500,Sam Cole,8,0
+Grace Lin,2026-08-12,,Sam Cole,6,0
+Grace Lin,2026-08-10,P-400,Sam Cole,8,0
+Henry Adams,2026-08-10,P-300,Sam Cole,8,0
+Isabel Cruz,2026-08-10,P-200,Nina Patel,8,0
+Karen Wu,2026-08-10,P-400,Sam Cole,8,0`;
+
+document.getElementById('loadSampleBtn').addEventListener('click', () => {
+  state.files.period1 = csvToFile(SAMPLE_P1_CSV, 'sample_period1.csv');
+  state.files.period2 = csvToFile(SAMPLE_P2_CSV, 'sample_period2.csv');
+  document.getElementById('slot1Text').textContent = '✓ sample_period1.csv';
+  document.getElementById('slot2Text').textContent = '✓ sample_period2.csv';
+  document.getElementById('slot1').classList.add('filled');
+  document.getElementById('slot2').classList.add('filled');
+  document.getElementById('period1_label').value = 'Aug 3–7 Week';
+  document.getElementById('period2_label').value = 'Aug 10–14 Week';
+  updateRunButtonState();
+  document.getElementById('uploadForm').requestSubmit();
+});
+
+/* ==========================================================================
+   UPLOAD / RUN AUDIT
+   ========================================================================== */
+document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const errorEl = document.getElementById('uploadError');
+  errorEl.classList.add('hidden');
+
+  document.getElementById('intakeSection').classList.add('hidden');
+  document.getElementById('loadingSection').classList.remove('hidden');
+
+  const formData = new FormData();
+  formData.append('period1_file', state.files.period1);
+  formData.append('period2_file', state.files.period2);
+  formData.append('period1_label', document.getElementById('period1_label').value || 'Period 1');
+  formData.append('period2_label', document.getElementById('period2_label').value || 'Period 2');
+  formData.append('max_reasonable_hours', document.getElementById('max_reasonable_hours').value);
+  formData.append('min_reasonable_hours', document.getElementById('min_reasonable_hours').value);
+  formData.append('max_single_day_hours', document.getElementById('max_single_day_hours').value);
+  formData.append('spike_drop_pct_threshold', document.getElementById('spike_drop_pct_threshold').value);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/upload`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Upload failed.');
+
+    state.sessionId = data.session_id;
+    state.report = data.report;
+    state.columnMapping = data.column_mapping;
+
+    renderDashboard();
+    document.getElementById('loadingSection').classList.add('hidden');
+    document.getElementById('dashboardSection').classList.remove('hidden');
+
+    const indicator = document.getElementById('sessionIndicator');
+    indicator.classList.remove('hidden');
+    indicator.classList.add('flex');
+    document.getElementById('sessionLabel').textContent =
+      `${data.report.summary.label_prev} vs ${data.report.summary.label_curr}`;
+
+  } catch (err) {
+    document.getElementById('loadingSection').classList.add('hidden');
+    document.getElementById('intakeSection').classList.remove('hidden');
+    errorEl.textContent = err.message;
+    errorEl.classList.remove('hidden');
+  }
+});
+
+document.getElementById('newAuditBtn').addEventListener('click', () => {
+  if (state.sessionId) {
+    fetch(`${API_BASE}/api/session/${state.sessionId}`, { method: 'DELETE' }).catch(() => {});
+  }
+  window.location.reload();
+});
+
+/* ==========================================================================
+   DASHBOARD RENDER
+   ========================================================================== */
+function renderDashboard() {
+  renderMappingStrip();
+  renderMetrics();
+  renderTab();
+}
+
+function renderMappingStrip() {
+  const cm = state.columnMapping;
+  const el = document.getElementById('mappingStrip');
+  const fmt = (label, mapping) => {
+    const pairs = Object.entries(mapping).map(([std, src]) => `${std}←"${src}"`).join('  ');
+    return `<span><span style="color:var(--text)">${label}:</span> ${pairs || '—'}</span>`;
+  };
+  el.innerHTML = `<span style="color:var(--amber)">COLUMN MAP</span>` +
+    fmt(state.report.summary.label_prev, cm.period1) +
+    fmt(state.report.summary.label_curr, cm.period2);
+}
+
+function metricCard(label, value, accentVar, sub) {
+  return `
+    <div class="metric-card rounded-lg p-4">
+      <p class="text-xs font-mono uppercase tracking-widest" style="color:var(--muted)">${label}</p>
+      <p class="metric-value text-2xl mt-1" style="color:${accentVar}">${value}</p>
+      ${sub ? `<p class="text-xs font-mono mt-1" style="color:var(--muted)">${sub}</p>` : ''}
+    </div>`;
+}
+
+function renderMetrics() {
+  const s = state.report.summary;
+  const deltaColor = s.hours_delta < 0 ? 'var(--danger)' : s.hours_delta > 0 ? 'var(--success)' : 'var(--text)';
+  const headcountDelta = s.active_headcount_curr - s.active_headcount_prev;
+  const html = [
+    metricCard('Total Hours (Current)', s.total_hours_curr.toLocaleString(), 'var(--text)', `${s.total_hours_prev.toLocaleString()}h prior`),
+    metricCard('Hours Δ', `${s.hours_delta > 0 ? '+' : ''}${s.hours_delta}h`, deltaColor, `${s.hours_delta_pct > 0 ? '+' : ''}${s.hours_delta_pct}%`),
+    metricCard('Active Headcount', s.active_headcount_curr, 'var(--text)', `${headcountDelta > 0 ? '+' : ''}${headcountDelta} vs prior`),
+    metricCard('New Hires', s.new_hire_count, 'var(--success)'),
+    metricCard('Departures', s.departure_count, 'var(--danger)'),
+    metricCard('Flagged Anomalies', s.anomaly_count, 'var(--amber)', `${s.anomaly_severity_counts.high} high · ${s.anomaly_severity_counts.medium} med`),
+  ].join('');
+  document.getElementById('metricStrip').innerHTML = html;
+}
+
+/* ==========================================================================
+   TABS
+   ========================================================================== */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    state.activeTab = btn.dataset.tab;
+    state.page = 1;
+    state.sortBy = '';
+    state.search = '';
+    document.getElementById('tableSearch').value = '';
+    renderTab();
+  });
+});
+
+function renderTab() {
+  if (state.activeTab === 'overview') {
+    renderOverviewTab();
+  } else {
+    renderDataTable();
+  }
+}
+
+function renderOverviewTab() {
+  const s = state.report.summary;
+  document.getElementById('tableHead').innerHTML = '';
+  document.getElementById('paginationInfo').textContent = '';
+  document.getElementById('prevPageBtn').style.visibility = 'hidden';
+  document.getElementById('nextPageBtn').style.visibility = 'hidden';
+  document.getElementById('tableEmpty').classList.add('hidden');
+
+  const rows = [
+    ['Baseline period', s.label_prev],
+    ['Current period', s.label_curr],
+    ['Total hours — baseline', s.total_hours_prev],
+    ['Total hours — current', s.total_hours_curr],
+    ['Net hours change', `${s.hours_delta} (${s.hours_delta_pct}%)`],
+    ['Headcount — baseline', s.active_headcount_prev],
+    ['Headcount — current', s.active_headcount_curr],
+    ['Retained employees', s.retained_count],
+    ['New hires', s.new_hire_count],
+    ['Departures', s.departure_count],
+    ['Project / rep reassignments', s.reassignment_count],
+    ['Total flagged anomalies', s.anomaly_count],
+    ['— High severity', s.anomaly_severity_counts.high],
+    ['— Medium severity', s.anomaly_severity_counts.medium],
+    ['— Low severity', s.anomaly_severity_counts.low],
+  ];
+  document.getElementById('tableBody').innerHTML = rows.map(([k, v]) => `
+    <tr class="ledger-row border-b" style="border-color:var(--hairline)">
+      <td class="px-4 py-3 text-sm" style="color:var(--muted)">${k}</td>
+      <td class="px-4 py-3 text-sm font-mono">${v}</td>
+    </tr>`).join('');
+}
+
+/* ==========================================================================
+   DATA TABLE (search / sort / paginate via backend)
+   ========================================================================== */
+async function renderDataTable() {
+  document.getElementById('prevPageBtn').style.visibility = 'visible';
+  document.getElementById('nextPageBtn').style.visibility = 'visible';
+
+  const params = new URLSearchParams({
+    search: state.search,
+    sort_by: state.sortBy,
+    sort_dir: state.sortDir,
+    page: state.page,
+    page_size: state.pageSize,
+  });
+
+  const res = await fetch(`${API_BASE}/api/table/${state.sessionId}/${state.activeTab}?${params}`);
+  const data = await res.json();
+
+  const cols = TABLE_COLUMNS[state.activeTab];
+  document.getElementById('tableHead').innerHTML = cols.map(c => `
+    <th class="ledger-th px-4 py-3 text-left" data-key="${c.key}">
+      ${c.label} ${state.sortBy === c.key ? (state.sortDir === 'asc' ? '↑' : '↓') : ''}
+    </th>`).join('');
+
+  document.querySelectorAll('#tableHead th').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.key;
+      if (state.sortBy === key) {
+        state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        state.sortBy = key;
+        state.sortDir = 'asc';
+      }
+      renderDataTable();
+    });
+  });
+
+  const emptyEl = document.getElementById('tableEmpty');
+  if (data.rows.length === 0) {
+    document.getElementById('tableBody').innerHTML = '';
+    emptyEl.textContent = state.search
+      ? `No results match "${state.search}".`
+      : `No records in this category — nothing to report.`;
+    emptyEl.classList.remove('hidden');
+  } else {
+    emptyEl.classList.add('hidden');
+    document.getElementById('tableBody').innerHTML = data.rows.map(row => `
+      <tr class="ledger-row border-b" style="border-color:var(--hairline)">
+        ${cols.map(c => `<td class="px-4 py-3 text-sm align-top">${formatCell(state.activeTab, c.key, row[c.key])}</td>`).join('')}
+      </tr>`).join('');
+  }
+
+  const info = document.getElementById('paginationInfo');
+  info.textContent = data.total === 0
+    ? 'Showing 0 of 0'
+    : `Showing ${(data.page - 1) * data.page_size + 1}–${Math.min(data.page * data.page_size, data.total)} of ${data.total}`;
+
+  document.getElementById('prevPageBtn').disabled = data.page <= 1;
+  document.getElementById('nextPageBtn').disabled = data.page >= data.total_pages;
+}
+
+function formatCell(tab, key, value) {
+  if (value === null || value === undefined || value === '') return '<span style="color:var(--muted)">—</span>';
+  if (Array.isArray(value)) {
+    return value.length ? value.map(v => `<span class="stamp stamp-flat stamp-neutral">${escapeHtml(v)}</span>`).join(' ') : '<span style="color:var(--muted)">—</span>';
+  }
+  if (tab === 'anomalies' && key === 'severity') {
+    return `<span class="stamp stamp-${value}">${value}</span>`;
+  }
+  if (tab === 'anomalies' && key === 'type') {
+    return `<span class="font-mono text-xs" style="color:var(--muted)">${escapeHtml(value)}</span>`;
+  }
+  if (typeof value === 'number') {
+    return `<span class="font-mono">${value}</span>`;
+  }
+  return escapeHtml(String(value));
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+let searchDebounce;
+document.getElementById('tableSearch').addEventListener('input', (e) => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => {
+    state.search = e.target.value;
+    state.page = 1;
+    if (state.activeTab !== 'overview') renderDataTable();
+  }, 250);
+});
+
+document.getElementById('prevPageBtn').addEventListener('click', () => {
+  if (state.page > 1) { state.page--; renderDataTable(); }
+});
+document.getElementById('nextPageBtn').addEventListener('click', () => {
+  state.page++; renderDataTable();
+});
+
+/* ==========================================================================
+   EXPORTS
+   ========================================================================== */
+document.getElementById('exportCsvBtn').addEventListener('click', () => {
+  if (state.activeTab === 'overview') {
+    alert('Select a specific table tab (New Hires, Anomalies, etc.) to export as CSV.');
+    return;
+  }
+  window.open(`${API_BASE}/api/export/csv/${state.sessionId}?table=${state.activeTab}`, '_blank');
+});
+
+document.getElementById('exportPdfBtn').addEventListener('click', () => {
+  window.open(`${API_BASE}/api/export/pdf/${state.sessionId}`, '_blank');
+});
+
+/* ==========================================================================
+   QUERY DECK
+   ========================================================================== */
+function addChatBubble(role, text) {
+  const feed = document.getElementById('chatFeed');
+  const bubble = document.createElement('div');
+  bubble.className = `fade-in rounded-lg px-4 py-3 text-sm ${role === 'q' ? 'chat-bubble-q' : 'chat-bubble-a'}`;
+  bubble.style.maxWidth = '90%';
+  if (role === 'q') {
+    bubble.innerHTML = `<span class="font-mono text-xs" style="color:var(--muted)">YOU</span><p class="mt-1">${escapeHtml(text)}</p>`;
+  } else {
+    bubble.style.marginLeft = 'auto';
+    bubble.innerHTML = `<span class="font-mono text-xs" style="color:var(--amber)">LEDGER</span><p class="mt-1">${escapeHtml(text)}</p>`;
+    bubble.style.textAlign = 'right';
+  }
+  feed.appendChild(bubble);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+async function askQuestion(question) {
+  if (!question.trim()) return;
+  addChatBubble('q', question);
+  document.getElementById('queryInput').value = '';
+
+  try {
+    const res = await fetch(`${API_BASE}/api/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: state.sessionId, question }),
+    });
+    const data = await res.json();
+    addChatBubble('a', data.answer);
+  } catch (err) {
+    addChatBubble('a', 'Something went wrong reaching the audit engine. Please try again.');
+  }
+}
+
+document.getElementById('queryForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  askQuestion(document.getElementById('queryInput').value);
+});
+
+document.querySelectorAll('.suggestion-chip').forEach(chip => {
+  chip.addEventListener('click', () => askQuestion(chip.textContent));
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+# Only needed if you deploy with Fly.io. Run `flyctl launch` first and let
+# it generate/adjust this file, or drop this one in and run `flyctl deploy`.
+# Change `app` to a name that's unique across all of Fly.io.
+app = "timesheet-audit-agent"
+primary_region = "iad"
+
+[build]
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
