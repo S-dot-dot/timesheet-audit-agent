@@ -218,7 +218,7 @@ class TimesheetAuditEngine:
         if df.empty:
             return out
 
-        key_cols = [c for c in ["employee_name", "date", "project_id"] if c in df.columns]
+        key_cols = [c for c in ["employee_name", "date", "project_id", "activity_type"] if c in df.columns]
         if "date" not in key_cols or df["date"].isna().all():
             return out  # can't meaningfully detect duplicate day entries without dates
 
