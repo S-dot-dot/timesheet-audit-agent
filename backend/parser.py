@@ -34,7 +34,8 @@ STANDARD_FIELDS: dict[str, list[str]] = {
     ],
     "employee_id": [
         "employee id", "emp id", "employee number", "staff id", "id",
-        "worker id", "badge id", "personnel id",
+        "worker id", "badge id", "personnel id", "personnel no",
+        "personnel number", "personnel",
     ],
     "hours_worked": [
         "hours worked", "hours", "total hours", "hrs", "hours logged",
@@ -43,6 +44,10 @@ STANDARD_FIELDS: dict[str, list[str]] = {
     "project_id": [
         "project id", "project", "project code", "project name", "proj id",
         "proj", "job code", "cost center", "task", "wbs",
+    ],
+    "activity_type": [
+        "activity type", "actvity type", "activity code", "act type",
+        "charge type", "task type",
     ],
     "sales_rep": [
         "sales rep", "rep", "sales representative", "account rep",
@@ -164,10 +169,20 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
     """
     mapping = detect_column_mapping(list(df.columns))
 
-    if mapping.missing_required:
+    # Some real-world exports (e.g. SAP-style payroll extracts) only carry a
+    # personnel/employee ID column and no actual name column. Rather than
+    # hard-failing on a file that's otherwise perfectly usable, fall back to
+    # displaying the ID as the name — a human can still recognize/relabel
+    # people by their ID, and every other check still works.
+    missing_required = list(mapping.missing_required)
+    fall_back_name_to_id = "employee_name" in missing_required and "employee_id" in mapping.mapping
+    if fall_back_name_to_id:
+        missing_required.remove("employee_name")
+
+    if missing_required:
         raise TimesheetParseError(
             f"'{source_label}' is missing required column(s): "
-            f"{', '.join(mapping.missing_required)}. "
+            f"{', '.join(missing_required)}. "
             f"Detected columns were: {', '.join(df.columns)}"
         )
 
@@ -178,6 +193,11 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
     for std_field in STANDARD_FIELDS:
         if std_field not in std_df.columns:
             std_df[std_field] = pd.NA
+
+    if fall_back_name_to_id:
+        raw_id = std_df["employee_id"].astype(str).str.strip()
+        raw_id = raw_id.replace({"nan": "", "None": "", "<NA>": ""})
+        std_df["employee_name"] = "Personnel #" + raw_id
 
     # --- Type coercion & cleanup ---
     std_df["employee_name"] = std_df["employee_name"].astype(str).str.strip()
@@ -190,7 +210,7 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
     if "date" in std_df.columns:
         std_df["date"] = pd.to_datetime(std_df["date"], errors="coerce")
 
-    for col in ["project_id", "sales_rep", "employee_id", "notes"]:
+    for col in ["project_id", "sales_rep", "employee_id", "notes", "activity_type"]:
         std_df[col] = std_df[col].astype(str).str.strip()
         std_df[col] = std_df[col].replace({"nan": "", "None": "", "<NA>": ""})
 
