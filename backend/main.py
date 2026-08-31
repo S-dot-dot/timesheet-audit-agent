@@ -12,7 +12,10 @@ GET    /api/export/csv/{session_id}           CSV export of a given table
 GET    /api/export/pdf/{session_id}           Full PDF audit report
 POST   /api/query                  Natural-language question answering over the report
 DELETE /api/session/{session_id}   Free server memory for a session
-GET    /                           Serves the frontend dashboard (single-file app)
+GET    /login                      Serves the login screen
+POST   /api/login                  Checks the shared passcode, starts a session
+POST   /api/logout                 Ends the current session
+GET    /                           Serves the frontend dashboard (single-file app) — requires login
 
 Run with:  uvicorn main:app --reload --port 8000
 """
@@ -24,7 +27,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,6 +37,7 @@ from parser import load_and_standardize, TimesheetParseError
 from comparison_engine import TimesheetAuditEngine, AuditConfig
 from query_engine import answer_question
 from export_utils import table_to_csv_bytes, build_pdf_report
+from auth import AuthMiddleware, check_passcode, issue_token, revoke, SESSION_COOKIE
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -52,6 +56,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Gate everything behind the shared-passcode login. Must be added after CORS
+# so CORS headers still get applied to the (401/redirect) responses this
+# middleware returns.
+app.add_middleware(AuthMiddleware)
 
 # ---------------------------------------------------------------------------
 # In-memory session store.
@@ -79,7 +88,6 @@ def _get_session(session_id: str) -> dict:
 
 TABLE_KEYS = {"new_hires", "departures", "reassignments", "anomalies", "employees_curr", "employees_prev"}
 
-
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -93,6 +101,44 @@ class ConfigOverrides(BaseModel):
     min_reasonable_hours: Optional[float] = None
     max_single_day_hours: Optional[float] = None
     spike_drop_pct_threshold: Optional[float] = None
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    login_path = FRONTEND_DIR / "login.html"
+    if login_path.exists():
+        return FileResponse(login_path)
+    return HTMLResponse("<h1>login.html not found</h1>", status_code=404)
+
+
+@app.post("/api/login")
+async def login(request: Request):
+    data = await request.json()
+    if not check_passcode(data.get("passcode", "")):
+        return JSONResponse({"detail": "Incorrect passcode"}, status_code=401)
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(
+        SESSION_COOKIE,
+        issue_token(),
+        httponly=True,
+        samesite="lax",
+        max_age=60 * 60 * 8,  # 8 hours
+    )
+    return resp
+
+
+@app.post("/api/logout")
+async def logout(request: Request):
+    revoke(request.cookies.get(SESSION_COOKIE))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SESSION_COOKIE)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +162,6 @@ async def upload_timesheets(
     try:
         bytes1 = await period1_file.read()
         bytes2 = await period2_file.read()
-
         if not bytes1 or not bytes2:
             raise HTTPException(status_code=400, detail="One or both uploaded files are empty.")
 
@@ -150,7 +195,6 @@ async def upload_timesheets(
             "column_mapping": SESSIONS[session_id]["column_mapping"],
             "report": report,
         }
-
     except TimesheetParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except HTTPException:
@@ -189,6 +233,7 @@ async def get_table(
 
     if search:
         needle = search.lower()
+
         def _matches(row: dict) -> bool:
             for v in row.values():
                 if isinstance(v, (list, set)):
@@ -197,6 +242,7 @@ async def get_table(
                 elif needle in str(v).lower():
                     return True
             return False
+
         rows = [r for r in rows if _matches(r)]
 
     if sort_by:
@@ -207,6 +253,7 @@ async def get_table(
             if val is None:
                 return ""
             return val
+
         try:
             rows = sorted(rows, key=_sort_key, reverse=(sort_dir == "desc"))
         except TypeError:
@@ -235,9 +282,11 @@ async def get_table(
 async def export_csv(session_id: str, table: str = Query(..., description="Table name to export")):
     if table not in TABLE_KEYS:
         raise HTTPException(status_code=400, detail=f"Unknown table '{table}'. Valid options: {sorted(TABLE_KEYS)}")
+
     session = _get_session(session_id)
     rows = session["report"].get(table, [])
     csv_bytes = table_to_csv_bytes(rows)
+
     return Response(
         content=csv_bytes,
         media_type="text/csv",
@@ -249,6 +298,7 @@ async def export_csv(session_id: str, table: str = Query(..., description="Table
 async def export_pdf(session_id: str):
     session = _get_session(session_id)
     pdf_bytes = build_pdf_report(session["report"])
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -284,8 +334,6 @@ async def health():
 # Serve the frontend as a single unified app (optional convenience).
 # The frontend can also be opened directly as a static file / hosted separately.
 # ---------------------------------------------------------------------------
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-
 if FRONTEND_DIR.exists():
     @app.get("/", response_class=HTMLResponse)
     async def serve_frontend():
