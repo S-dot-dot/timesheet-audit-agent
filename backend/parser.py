@@ -161,6 +161,36 @@ def load_raw_dataframe(file_bytes: bytes, filename: str) -> pd.DataFrame:
     return df
 
 
+def _load_all_excel_sheets(file_bytes: bytes, filename: str) -> list[tuple[str, pd.DataFrame]]:
+    """
+    Load EVERY sheet in an Excel workbook, not just the first. Real payroll
+    exports sometimes carry supplemental data on a second sheet (e.g. a
+    "Manual Upload" tab for someone who worked under a special assignment
+    that week) — if we only ever read sheet 1, that person is invisible to
+    us on the week they're on the extra sheet, which then makes them look
+    like a brand-new hire the following week when they show up normally.
+    Sheets that don't contain usable data (empty, or no recognizable
+    columns) are skipped rather than causing a hard failure.
+    """
+    engine = "openpyxl" if filename.lower().endswith((".xlsx", ".xlsm")) else None
+    try:
+        sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, engine=engine)
+    except Exception as exc:  # noqa: BLE001
+        raise TimesheetParseError(f"Could not read '{filename}': {exc}") from exc
+
+    out: list[tuple[str, pd.DataFrame]] = []
+    for name, df in sheets.items():
+        df = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+        if df.empty or len(df.columns) == 0:
+            continue
+        df.columns = [str(c).strip() for c in df.columns]
+        out.append((name, df))
+
+    if not out:
+        raise TimesheetParseError(f"'{filename}' appears to be empty.")
+    return out
+
+
 def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataFrame, ColumnMapping]:
     """
     Rename a raw DataFrame's columns to the standard schema and coerce types.
@@ -199,6 +229,25 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
         raw_id = raw_id.replace({"nan": "", "None": "", "<NA>": ""})
         std_df["employee_name"] = "Personnel #" + raw_id
 
+    # Some payroll exports embed a numeric employee ID directly inside the
+    # name field itself, e.g. "Guanipa, JeanGuanipa0418 (111154420)". We've
+    # confirmed against real files that this trailing ID can be silently
+    # reassigned to the same person between pay periods (same name, same
+    # everything else, different number in the parens) — which, left alone,
+    # makes every headcount/new-hire comparison misread a routine re-number
+    # as that person quitting one week and getting hired again the next.
+    # When there's no separate ID column already mapped, pull that trailing
+    # "(12345)" out into employee_id and key matching off the stable name
+    # text instead.
+    if "employee_id" not in mapping.mapping:
+        extracted = std_df["employee_name"].astype(str).str.extract(
+            r"^(?P<clean_name>.*?)\s*\((?P<embedded_id>\d+)\)\s*$"
+        )
+        has_embedded_id = extracted["embedded_id"].notna()
+        if has_embedded_id.any():
+            std_df.loc[has_embedded_id, "employee_id"] = extracted.loc[has_embedded_id, "embedded_id"]
+            std_df.loc[has_embedded_id, "employee_name"] = extracted.loc[has_embedded_id, "clean_name"]
+
     # --- Type coercion & cleanup ---
     std_df["employee_name"] = std_df["employee_name"].astype(str).str.strip()
     std_df = std_df[std_df["employee_name"].str.len() > 0]
@@ -220,22 +269,57 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
 
 
 def load_and_standardize(file_bytes: bytes, filename: str, source_label: str) -> tuple[pd.DataFrame, ColumnMapping]:
-    """Convenience wrapper: load raw bytes straight to a standardized DataFrame."""
-    raw_df = load_raw_dataframe(file_bytes, filename)
-    std_df, mapping = standardize_dataframe(raw_df, source_label)
+    """
+    Convenience wrapper: load raw bytes straight to a standardized DataFrame.
 
-    # Some timesheet exports report one row per (employee, project, week)
-    # with a separate column per weekday ("Monday", "Tuesday", ...) holding
-    # that day's hours, alongside a week-ending date and a weekly total.
-    # Everything above treats each row as a single day worked — which is
-    # wrong for this layout, and badly confuses any per-day check (a
-    # 56-hour week gets read as a 56-hour DAY). When we spot that shape,
-    # explode each row into one row per real day actually worked instead.
-    weekday_cols = _find_weekday_columns(raw_df.columns)
-    if len(weekday_cols) >= 3:
-        std_df = _expand_weekly_rollup_to_daily(std_df, weekday_cols)
+    For Excel workbooks, every sheet is checked — not just the first — so a
+    supplemental tab (e.g. "Manual Upload") isn't silently dropped. Sheets
+    that don't contain usable timesheet columns are skipped rather than
+    failing the whole upload.
+    """
+    lower = filename.lower()
+    if lower.endswith((".xlsx", ".xlsm", ".xls")):
+        raw_sheets = _load_all_excel_sheets(file_bytes, filename)
+    else:
+        raw_sheets = [(None, load_raw_dataframe(file_bytes, filename))]
 
-    return std_df, mapping
+    standardized_parts: list[pd.DataFrame] = []
+    first_mapping: Optional[ColumnMapping] = None
+    skip_errors: list[str] = []
+
+    for sheet_name, raw_df in raw_sheets:
+        try:
+            std_df, mapping = standardize_dataframe(raw_df, source_label)
+        except TimesheetParseError as exc:
+            skip_errors.append(str(exc))
+            continue
+
+        # Some timesheet exports report one row per (employee, project, week)
+        # with a separate column per weekday ("Monday", "Tuesday", ...) holding
+        # that day's hours, alongside a week-ending date and a weekly total.
+        # Everything above treats each row as a single day worked — which is
+        # wrong for this layout, and badly confuses any per-day check (a
+        # 56-hour week gets read as a 56-hour DAY). When we spot that shape,
+        # explode each row into one row per real day actually worked instead.
+        weekday_cols = _find_weekday_columns(raw_df.columns)
+        if len(weekday_cols) >= 3:
+            std_df = _expand_weekly_rollup_to_daily(std_df, weekday_cols)
+
+        standardized_parts.append(std_df)
+        if first_mapping is None:
+            first_mapping = mapping
+
+    if not standardized_parts:
+        raise TimesheetParseError(
+            skip_errors[0] if skip_errors else f"'{source_label}' has no usable timesheet data."
+        )
+
+    combined = (
+        pd.concat(standardized_parts, ignore_index=True)
+        if len(standardized_parts) > 1
+        else standardized_parts[0]
+    )
+    return combined, first_mapping
 
 
 WEEKDAY_COLUMN_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
