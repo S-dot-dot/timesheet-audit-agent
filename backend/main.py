@@ -150,7 +150,7 @@ async def upload_timesheets(
     period2_file: UploadFile = File(..., description="Current / latest period timesheet"),
     period1_label: str = Form("Period 1"),
     period2_label: str = Form("Period 2"),
-    max_reasonable_hours: float = Form(60.0),
+    max_reasonable_hours: float = Form(80.0),
     min_reasonable_hours: float = Form(10.0),
     max_single_day_hours: float = Form(16.0),
     spike_drop_pct_threshold: float = Form(40.0),
