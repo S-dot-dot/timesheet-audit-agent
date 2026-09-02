@@ -62,6 +62,16 @@ STANDARD_FIELDS: dict[str, list[str]] = {
         "sick hours", "leave hours", "time off",
     ],
     "notes": ["notes", "comment", "comments", "remarks", "description"],
+    # "rate_type" isn't itself a data point we report — it's a category flag
+    # (e.g. "ST"/"OT"/"Lunch") some payroll exports use to split one
+    # employee's week across several rows. When present, we use it below to
+    # derive regular_hours/overtime_hours per row.
+    "rate_type": ["rate type", "pay type", "pay code", "wage type"],
+    "regular_hours": [
+        "regular hours", "regular", "straight time hours", "straight time",
+        "st hours",
+    ],
+    "overtime_hours": ["overtime hours", "overtime", "ot hours"],
 }
 
 REQUIRED_FIELDS = ["employee_name", "hours_worked"]
@@ -391,6 +401,27 @@ def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataF
     for col in ["project_id", "sales_rep", "employee_id", "notes", "activity_type"]:
         std_df[col] = std_df[col].astype(str).str.strip()
         std_df[col] = std_df[col].replace({"nan": "", "None": "", "<NA>": ""})
+
+    # Some payroll exports split one employee's week across several rows by
+    # a "Rate Type" (ST/OT/Lunch...) rather than reporting regular vs.
+    # overtime hours directly. When that's the only source we have for it,
+    # derive regular_hours/overtime_hours from it so anomaly checks that
+    # depend on the regular/OT split (e.g. "under 40 regular hours but
+    # already has overtime") have real data to work with instead of just
+    # falling back to a flat >40-total-hours guess, which can't ever fire
+    # that particular check.
+    std_df["regular_hours"] = pd.to_numeric(std_df["regular_hours"], errors="coerce")
+    std_df["overtime_hours"] = pd.to_numeric(std_df["overtime_hours"], errors="coerce")
+    if (
+        "rate_type" in mapping.mapping
+        and "regular_hours" not in mapping.mapping
+        and "overtime_hours" not in mapping.mapping
+    ):
+        rate_type_lower = std_df["rate_type"].astype(str).str.lower()
+        is_overtime = rate_type_lower.str.contains("ot", na=False)
+        is_break = rate_type_lower.str.contains("lunch", na=False) | rate_type_lower.str.contains("break", na=False)
+        std_df["overtime_hours"] = std_df["hours_worked"].where(is_overtime, 0.0)
+        std_df["regular_hours"] = std_df["hours_worked"].where(~is_overtime & ~is_break, 0.0)
 
     std_df["source_file"] = source_label
     std_df = std_df.reset_index(drop=True)
