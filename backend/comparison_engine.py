@@ -23,11 +23,13 @@ import pandas as pd
 
 @dataclass
 class AuditConfig:
-    max_reasonable_hours: float = 60.0     # flag totals above this (per period) without PTO covering the gap
+    max_reasonable_hours: float = 80.0     # flag totals above this (per period) without PTO covering the gap
     min_reasonable_hours: float = 10.0     # flag totals below this (per period) without PTO covering the gap
     max_single_day_hours: float = 16.0     # flag any single day/row above this
     spike_drop_pct_threshold: float = 40.0  # % change vs prior period that triggers a flag
     min_hours_for_spike_check: float = 5.0  # ignore tiny baselines to avoid noisy %s
+    regular_hours_cap: float = 40.0        # a "full" week of regular time, for the OT check below
+    min_overtime_hours_for_flag: float = 1.0  # flag if OT exceeds this while regular hours are still under the cap
 
 
 class TimesheetAuditEngine:
@@ -56,23 +58,32 @@ class TimesheetAuditEngine:
         """Roll raw row-level entries up to one summary row per employee."""
         if df.empty:
             return pd.DataFrame(columns=[
-                "employee_name", "total_hours", "total_pto", "projects",
-                "sales_reps", "entry_count", "primary_project", "primary_sales_rep",
+                "employee_name", "total_hours", "total_pto", "regular_hours",
+                "overtime_hours", "projects", "sales_reps", "entry_count",
+                "primary_project", "primary_sales_rep",
             ])
 
         def _clean_set(series: pd.Series) -> list[str]:
             vals = sorted({v for v in series if v and str(v).strip() and str(v).lower() != "nan"})
             return vals
 
+        # regular_hours/overtime_hours only exist for formats that actually
+        # carry a regular-vs-overtime split in the source data (see
+        # parser.py); everywhere else they're NA, which should come through
+        # as "no OT data available" (None) rather than blow up.
         grouped = df.groupby("employee_name", dropna=False)
         rows = []
         for name, g in grouped:
             projects = _clean_set(g["project_id"])
             reps = _clean_set(g["sales_rep"])
+            g_reg = pd.to_numeric(g["regular_hours"], errors="coerce") if "regular_hours" in g.columns else pd.Series(dtype=float)
+            g_ot = pd.to_numeric(g["overtime_hours"], errors="coerce") if "overtime_hours" in g.columns else pd.Series(dtype=float)
             rows.append({
                 "employee_name": name,
                 "total_hours": round(float(g["hours_worked"].sum()), 2),
                 "total_pto": round(float(g["pto_hours"].sum()), 2),
+                "regular_hours": round(float(g_reg.sum()), 2) if g_reg.notna().any() else None,
+                "overtime_hours": round(float(g_ot.sum()), 2) if g_ot.notna().any() else None,
                 "projects": projects,
                 "sales_reps": reps,
                 "entry_count": int(len(g)),
@@ -145,13 +156,16 @@ class TimesheetAuditEngine:
     # ------------------------------------------------------------------
     def detect_anomalies(self) -> list[dict]:
         anomalies: list[dict] = []
-        cfg = self.config
 
         anomalies += self._detect_period_outliers(self.agg_curr, self.label_curr)
         anomalies += self._detect_single_day_outliers(self.df_curr, self.label_curr)
-        anomalies += self._detect_duplicates_and_overlaps(self.df_curr, self.label_curr)
-        anomalies += self._detect_missing_project_codes(self.df_curr, self.label_curr)
-        anomalies += self._detect_spikes_and_drops()
+        anomalies += self._detect_duplicate_entries(self.df_curr, self.label_curr)
+        anomalies += self._detect_low_regular_high_overtime(self.agg_curr, self.label_curr)
+        # Per Darren's 9/2/2026 feedback, three rules are disabled for now
+        # (methods kept below in case they're wanted back later):
+        #   - "conflicting entries" (_detect_conflicting_entries)
+        #   - "missing project code" (_detect_missing_project_codes)
+        #   - "big change in hours" (_detect_spikes_and_drops)
 
         # Sort most severe / most recent first for readability
         severity_rank = {"high": 0, "medium": 1, "low": 2}
@@ -213,7 +227,7 @@ class TimesheetAuditEngine:
             })
         return out
 
-    def _detect_duplicates_and_overlaps(self, df: pd.DataFrame, label: str) -> list[dict]:
+    def _detect_duplicate_entries(self, df: pd.DataFrame, label: str) -> list[dict]:
         out = []
         if df.empty:
             return out
@@ -243,7 +257,23 @@ class TimesheetAuditEngine:
                 "value": float(row["hours_worked"]),
             })
 
-        # Conflicting entries: same employee/date/project but DIFFERENT hours logged twice
+        return out
+
+    def _detect_conflicting_entries(self, df: pd.DataFrame, label: str) -> list[dict]:
+        """
+        Disabled per Darren's 9/2/2026 feedback (not called from
+        detect_anomalies) — kept here in case the rule is wanted back.
+        Flags cases where the same employee has different hour amounts
+        entered for the same project on the same day.
+        """
+        out = []
+        if df.empty:
+            return out
+
+        key_cols = [c for c in ["employee_name", "date", "project_id", "activity_type"] if c in df.columns]
+        if "date" not in key_cols or df["date"].isna().all():
+            return out
+
         grouped = df.groupby(key_cols, dropna=False)["hours_worked"].nunique().reset_index()
         conflicting_keys = grouped[grouped["hours_worked"] > 1]
         for _, key_row in conflicting_keys.iterrows():
@@ -264,6 +294,40 @@ class TimesheetAuditEngine:
                 "value": float(total_conflicting),
             })
 
+        return out
+
+    def _detect_low_regular_high_overtime(self, agg: pd.DataFrame, label: str) -> list[dict]:
+        """
+        Added per Darren's 9/2/2026 feedback: flag employees who logged
+        under a full week of regular time but still have meaningful
+        overtime — a red flag for OT being applied somewhere it shouldn't
+        (e.g. daily-OT rules kicking in on a short week). Only fires for
+        formats where the source data actually distinguishes regular vs.
+        overtime hours (see parser.py) — everywhere else, regular_hours/
+        overtime_hours come back as None and this check is skipped rather
+        than guessed at.
+        """
+        cfg = self.config
+        out = []
+        if agg.empty or "regular_hours" not in agg.columns or "overtime_hours" not in agg.columns:
+            return out
+
+        for _, row in agg.iterrows():
+            regular = row.get("regular_hours")
+            overtime = row.get("overtime_hours")
+            if regular is None or overtime is None or pd.isna(regular) or pd.isna(overtime):
+                continue  # this format doesn't carry a regular/OT split
+            if regular < cfg.regular_hours_cap and overtime > cfg.min_overtime_hours_for_flag:
+                out.append({
+                    "type": "low_regular_high_overtime",
+                    "severity": "medium",
+                    "employee_name": row["employee_name"],
+                    "period": label,
+                    "detail": f"Only {regular}h of regular time logged in {label}, but "
+                              f"{overtime}h of overtime — worth checking why OT was applied "
+                              f"on a below-full week.",
+                    "value": float(overtime),
+                })
         return out
 
     def _detect_missing_project_codes(self, df: pd.DataFrame, label: str) -> list[dict]:
