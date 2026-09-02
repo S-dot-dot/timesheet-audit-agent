@@ -191,12 +191,141 @@ def _load_all_excel_sheets(file_bytes: bytes, filename: str) -> list[tuple[str, 
     return out
 
 
+# ---------------------------------------------------------------------------
+# Shift-segment (clock in/out) format — e.g. TBL/TSMC-style time-tracking
+# exports. One row per work SEGMENT rather than per day: an employee's shift
+# gets split across multiple rows (work, paid lunch, unpaid lunch, time off),
+# each with its own start/end time and an hours value. This shape can't be
+# handled by the generic one-column-per-field mapper above because getting
+# an accurate hours total requires business-rule judgment calls per row
+# (e.g. an unpaid lunch segment must NOT count toward hours worked, while a
+# *paid* lunch segment must). Detected by fingerprint and handled separately.
+# ---------------------------------------------------------------------------
+_SHIFT_SEGMENT_REQUIRED_COLUMNS = {
+    "localdate", "localstarttime", "localendtime", "fname", "lname", "hours", "jobcode1",
+}
+
+
+def _is_shift_segment_export(columns: list[str]) -> bool:
+    normalized = {_normalize(c) for c in columns}
+    return _SHIFT_SEGMENT_REQUIRED_COLUMNS.issubset(normalized)
+
+
+def _classify_shift_segment(jobcode_1: str) -> str:
+    """
+    Categorize a single shift-segment row so we know whether its "hours"
+    value should count toward hours worked, paid time off, or neither.
+    Verified against a real TSMC weekly PDF report: e.g. a day with
+    7h work + 0.5h paid lunch + 2.5h work + 0.5h UNPAID lunch reports a
+    10.00h total (the unpaid lunch is dropped entirely), and a day that's
+    entirely "Time Off - UNPAID (APPROVED)" reports 0.00h.
+    """
+    text = (jobcode_1 or "").lower()
+    if "unpaid" in text and "lunch" in text:
+        return "exclude"
+    if "time off" in text and "unpaid" in text:
+        return "exclude"
+    if "time off" in text:
+        return "pto"
+    return "work"
+
+
+def _standardize_shift_segments(df: pd.DataFrame, source_label: str) -> tuple[pd.DataFrame, ColumnMapping]:
+    """Standardize a shift-segment (clock in/out) export into the standard schema."""
+    col_lookup = {_normalize(c): c for c in df.columns}
+
+    def col(name: str) -> str:
+        return col_lookup[_normalize(name)]
+
+    out = pd.DataFrame(index=df.index)
+    fname = df[col("fname")].astype(str).str.strip()
+    lname = df[col("lname")].astype(str).str.strip()
+    out["employee_name"] = (fname + " " + lname).str.strip()
+
+    # A username/email is a far more reliable unique identifier here than
+    # name — names can repeat, and this format appends role tags like
+    # "(T)" to last names — so prefer it as the employee_id when present.
+    if "username" in col_lookup and df[col("username")].astype(str).str.strip().replace({"nan": ""}).ne("").any():
+        out["employee_id"] = df[col("username")].astype(str).str.strip()
+    elif "payroll_id" in col_lookup:
+        out["employee_id"] = df[col("payroll_id")].astype(str).str.strip()
+    else:
+        out["employee_id"] = pd.NA
+
+    out["date"] = pd.to_datetime(df[col("local_date")], errors="coerce")
+
+    hours = pd.to_numeric(df[col("hours")], errors="coerce").fillna(0.0)
+    jobcode_1 = df[col("jobcode_1")].astype(str)
+    category = jobcode_1.apply(_classify_shift_segment)
+
+    out["hours_worked"] = hours.where(category == "work", 0.0)
+    out["pto_hours"] = hours.where(category == "pto", 0.0)
+
+    if "jobcode_2" in col_lookup:
+        jobcode_2 = df[col("jobcode_2")].astype(str).str.strip().replace({"nan": ""})
+        out["project_id"] = jobcode_2.where(jobcode_2 != "", jobcode_1)
+    else:
+        out["project_id"] = jobcode_1
+
+    out["sales_rep"] = pd.NA
+    out["activity_type"] = jobcode_1.where(category == "work", pd.NA)
+    out["notes"] = df[col("notes")].astype(str).str.strip() if "notes" in col_lookup else pd.NA
+
+    for std_field in STANDARD_FIELDS:
+        if std_field not in out.columns:
+            out[std_field] = pd.NA
+
+    out["employee_name"] = out["employee_name"].astype(str).str.strip()
+    out = out[out["employee_name"].str.len() > 0]
+    out = out[~out["employee_name"].str.lower().isin(["nan", "none", ""])]
+
+    for c in ["project_id", "sales_rep", "employee_id", "notes", "activity_type"]:
+        out[c] = out[c].astype(str).str.strip()
+        out[c] = out[c].replace({"nan": "", "None": "", "<NA>": ""})
+
+    out["source_file"] = source_label
+
+    # This format naturally splits one continuous task into multiple rows
+    # around a lunch break (e.g. 7h before lunch + 2.5h after, same
+    # employee/day/task) — each half has a different "hours" value by
+    # design, not because anything's wrong. Left as separate rows, the
+    # duplicate/conflict checker misreads every ordinary split shift as a
+    # conflicting entry (verified: 788 false flags out of ~3,300 rows on a
+    # real file). Collapse same employee+day+project+activity segments into
+    # one row, summing hours, before this ever reaches that check.
+    group_cols = ["employee_name", "employee_id", "date", "project_id", "activity_type", "source_file"]
+    agg = {
+        "hours_worked": "sum",
+        "pto_hours": "sum",
+        "sales_rep": "first",
+        "notes": "first",
+    }
+    out = out.groupby(group_cols, dropna=False, as_index=False).agg(agg)
+    out = out.reset_index(drop=True)
+
+    mapping = ColumnMapping(
+        mapping={
+            "employee_name": "fname + lname",
+            "employee_id": "username" if "username" in col_lookup else "payroll_id",
+            "hours_worked": "hours (work + paid-lunch segments, excl. unpaid breaks/time off)",
+            "pto_hours": "hours (unpaid time-off segments excluded; paid time-off summed here)",
+            "date": "local_date",
+            "project_id": "jobcode_2 (falls back to jobcode_1)",
+        },
+        unmapped_source_columns=[c for c in df.columns if _normalize(c) not in _SHIFT_SEGMENT_REQUIRED_COLUMNS],
+    )
+    return out, mapping
+
+
 def standardize_dataframe(df: pd.DataFrame, source_label: str) -> tuple[pd.DataFrame, ColumnMapping]:
     """
     Rename a raw DataFrame's columns to the standard schema and coerce types.
     Returns the standardized DataFrame plus the ColumnMapping used (for
     transparency in the UI / audit trail).
     """
+    if _is_shift_segment_export(list(df.columns)):
+        return _standardize_shift_segments(df, source_label)
+
     mapping = detect_column_mapping(list(df.columns))
 
     # Some real-world exports (e.g. SAP-style payroll extracts) only carry a
